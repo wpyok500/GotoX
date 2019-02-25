@@ -2,12 +2,13 @@
 
 import os
 import re
-import threading
+import logging
 from functools import partial
 from time import sleep
-from . import clogging as logging
-from .compat import thread, ConfigParser
-from .common import config_dir, isip, isipv4, isipv6, classlist
+from configparser import ConfigParser
+from threading import _start_new_thread as start_new_thread
+from .common.net import isip, isipv4, isipv6
+from .common.path import config_dir
 from .GlobalConfig import GC
 
 BLOCK     = 1
@@ -54,14 +55,13 @@ isfiltername = re.compile(r'(?P<order>\d+)-(?P<action>\w+)').match
 isempty = re.compile(r'^\s*$').match
 if GC.LINK_PROFILE == 'ipv4':
     pickip = lambda str: [ip.strip() for ip in str.split('|') if isipv4(ip.strip())]
-    ipnotuse = isipv6
+    isipuse = isipv4
 elif GC.LINK_PROFILE == 'ipv46':
     pickip = lambda str: [ip.strip() for ip in str.split('|') if isip(ip.strip())]
-    #还要使用字符名称，所以不用验证
-    ipnotuse = lambda x: False
+    isipuse = isip
 elif GC.LINK_PROFILE == 'ipv6':
     pickip = lambda str: [ip.strip() for ip in str.split('|') if isipv6(ip.strip())]
-    ipnotuse = isipv4
+    isipuse = isipv6
 
 class actionfilterlist(list):
 
@@ -72,7 +72,7 @@ class actionfilterlist(list):
         self.readconfig()
         self.FILE_MTIME = os.path.getmtime(self.CONFIG_FILENAME)
         self.RESET = False
-        thread.start_new_thread(self.check_modify, ())
+        start_new_thread(self.check_modify, ())
 
     def readconfig(self):
         CONFIG = ConfigParser(inline_comment_prefixes=('#', ';'))
@@ -106,13 +106,22 @@ class actionfilterlist(list):
                     host = host.lower()
                 if path and path[0] == '@':
                     path = re.compile(path[1:]).search
+                if filters.action == FAKECERT and v and '*' not in v:
+                    v = v.encode()
                 if filters.action in (FORWARD, DIRECT):
+                    if v and v[0] == '@':
+                        p, _, v = v.partition(' ')
+                    else:
+                        p = None
                     if isempty(v):
                         v = None
                     elif '|' in v:
-                        v = pickip(' '+v.lower()) or None
-                    elif ipnotuse(v) or not (v in GC.IPLIST_MAP or v.find('.') > 0):
+                        v = pickip(v.lower()) or None
+                    elif isipuse(v):
+                        v = [v]
+                    elif isip(v) or not (v in GC.IPLIST_MAP or v.find('.') > 0):
                         v = None
+                    v = v, p
                 elif filters.action in (REDIRECT, IREDIRECT):
                     if v and v[0] == '!':
                         v = v[1:].lstrip(' \t')
@@ -143,6 +152,8 @@ class actionfilterlist(list):
                         else:
                             rule = patterns, replaces, 1
                         v = rule, unquote, mhost, raction
+                    else:
+                        v = v, None, mhost, None
                 filters.append((scheme.lower(), host, path, v))
             self.append(filters)
 

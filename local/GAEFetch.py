@@ -1,18 +1,86 @@
 # coding:utf-8
 
+import ssl
 import zlib
+import queue
 import struct
+import logging
 from io import BytesIO
-from . import clogging as logging
-from .compat import Queue, httplib
+from time import time, timezone, localtime, strftime, strptime, mktime
+from http.client import HTTPResponse, parse_headers
 from .GlobalConfig import GC
-from .GAEUpdate import testipuseable
+from .GIPManager import test_ip_gae
 from .HTTPUtil import http_gws
 from .common.decompress import GzipSock
+from .common.util import make_lock_decorator, LRUCache
 
-qGAE = Queue.LifoQueue()
+timezone_PST = timezone - 3600 * 8 # UTC-8
+timezone_PDT = timezone - 3600 * 7 # UTC-7
+def get_refreshtime():
+    #距离 GAE 流量配额每日刷新的时间
+    #刷新时间是否遵循夏令时？
+    now = time() + timezone_PST
+    refreshtime = strftime('%y %j', localtime(now + 86400))
+    refreshtime = mktime(strptime(refreshtime, '%y %j'))
+    return refreshtime - now
+
+nappid = 0
+_lock_nappid = make_lock_decorator()
+badappids = LRUCache(len(GC.GAE_APPIDS))
+qGAE = queue.LifoQueue()
 for _ in range(GC.GAE_MAXREQUESTS * len(GC.GAE_APPIDS)):
     qGAE.put(True)
+
+def check_appid_exists(appid):
+    host = '%s.appspot.com' % appid
+    for _ in range(3):
+        err = None
+        response = None
+        try:
+            sock = http_gws.create_ssl_connection((host, 443), 'google_gae', 'google_gae|:443')
+            sock.sendall(b'HEAD / HTTP/1.1\r\n'
+                         b'Host: %s\r\n'
+                         b'Connection: Close\r\n\r\n' % host.encode())
+            response = HTTPResponse(sock, method='HEAD')
+            response.begin()
+        except:
+            err = True
+        finally:
+            if response:
+                response.close()
+                if err is None:
+                    exists = response.status in (200, 503)
+                    if exists:
+                        http_gws.ssl_connection_cache['google_gae|:443'].append((time(), sock))
+                    return exists
+
+@_lock_nappid
+def get_appid():
+    global nappid
+    while True:
+        nappid += 1
+        if nappid >= len(GC.GAE_APPIDS):
+            nappid = 0
+        appid = GC.GAE_APPIDS[nappid]
+        contains, expired, _ = badappids.getstate(appid)
+        if contains and expired:
+            for _ in range(GC.GAE_MAXREQUESTS):
+                qGAE.put(True)
+        if not contains or expired:
+            break
+    return appid
+
+def mark_badappid(appid, time=None):
+    if appid not in badappids:
+        if time is None:
+            time = get_refreshtime()
+            if len(GC.GAE_APPIDS) - len(badappids) <= 1:
+                logging.error('全部的 AppID 流量都使用完毕')
+            else:
+                logging.warning('当前 AppID[%s] 流量使用完毕，切换下一个…', appid)
+        badappids.set(appid, True, time)
+        for _ in range(GC.GAE_MAXREQUESTS):
+            qGAE.get()
 
 gae_options = []
 if GC.GAE_DEBUG:
@@ -30,16 +98,15 @@ if gae_options:
 def make_errinfo(response, htmltxt):
     del response.headers['Content-Type']
     del response.headers['Connection']
-    response.headers['Content-Type'] = 'text/plain; charset=UTF-8'
+    response.headers['Content-Type'] = 'text/html; charset=utf-8'
     response.headers['Content-Length'] = len(htmltxt)
     response.fp = BytesIO(htmltxt)
-    response.read = response.fp.read
-    return response
+    response.length = len(htmltxt)
 
 class gae_params:
     port = 443
     ssl = True
-    hostname = 'google_gws'
+    hostname = 'google_gae'
     path = GC.GAE_PATH
     command = 'POST'
     fetchhost = '%s.appspot.com'
@@ -80,20 +147,26 @@ def gae_urlfetch(method, url, headers, payload, appid, getfast=None, **kwargs):
     realurl = 'GAE-' + url
     qGAE.get() # get start from Queue
     while True:
-        response = http_gws.request(request_params, payload, request_headers, connection_cache_key='google_gws:443', getfast=getfast, realmethod=method, realurl=realurl)
+        response = http_gws.request(request_params, payload, request_headers, connection_cache_key='google_gae|:443', getfast=getfast, realmethod=method, realurl=realurl)
         if response is None:
             return
-        app_server = response.headers.get('Server')
-        if app_server == 'Google Frontend' or testipuseable(response.xip[0]):
+        if response.status not in (200, 404):
             break
-        else:
-            logging.warning('发现并移除非 GAE IP：%s，Server：%s', response.xip[0], app_server)
+        app_server = response.headers.get('Server')
+        if app_server == 'Google Frontend':
+            break
+        if GC.GAE_ENABLEPROXY:
+            logging.warning('GAE 前置代理 [%s:%d] 无法正常工作', *response.xip)
+            continue
+        if test_ip_gae(response.xip[0]):
+            break
+        logging.warning('发现并移除非 GAE IP：%s，Server：%s', response.xip[0], app_server)
     response.app_status = response.status
     if response.status != 200:
         return response
     #解压并解析 chunked & gziped 响应
     if 'Transfer-Encoding' in response.headers:
-        responseg = httplib.HTTPResponse(GzipSock(response), method=method)
+        responseg = HTTPResponse(GzipSock(response), method=method)
         responseg.begin()
         responseg.app_status = 200
         responseg.xip =  response.xip
@@ -103,12 +176,14 @@ def gae_urlfetch(method, url, headers, payload, appid, getfast=None, **kwargs):
     data = response.read(2)
     if len(data) < 2:
         response.status = 502
-        return make_errinfo(response, b'connection aborted. too short leadtype data=' + data)
+        make_errinfo(response, b'connection aborted. too short leadtype data=' + data)
+        return response
     headers_length, = struct.unpack('!h', data)
     data = response.read(headers_length)
     if len(data) < headers_length:
         response.status = 502
-        return make_errinfo(response, b'connection aborted. too short headers data=' + data)
+        make_errinfo(response, b'connection aborted. too short headers data=' + data)
+        return response
     #解压缩并解析头部
     raw_response_line, headers_data = zlib.decompress(data, -zlib.MAX_WBITS).split(b'\r\n', 1)
     raw_response_line = str(raw_response_line, 'iso-8859-1')
@@ -116,19 +191,27 @@ def gae_urlfetch(method, url, headers, payload, appid, getfast=None, **kwargs):
     raw_response_length = len(raw_response_list)
     if raw_response_length == 3:
         _, status, reason = raw_response_list
-        response.status = int(status)
         response.reason = reason.strip()
     elif raw_response_length == 2:
         _, status = raw_response_list
-        status = int(status)
-        #标记 GoProxy 错误信息
-        if status in (400, 403, 502):
-            response.app_status = response.status = status
-            response.reason = 'debug error'
-        else:
-            response.status = status
-            response.reason = ''
+        response.reason = ''
     else:
         return
-    response.headers = response.msg = httplib.parse_headers(BytesIO(headers_data))
+    response.status = int(status)
+    #标记服务器端错误信息
+    headers_data, app_msg = headers_data.split(b'\r\n\r\n')
+    if app_msg:
+        response.app_status = response.status
+        response.reason = 'debug error'
+        response.app_msg = app_msg
+    response.headers = response.msg = parse_headers(BytesIO(headers_data))
+    if response.app_status == 200:
+        response._method = method
+        if response.status in (204, 205, 304) or 100 <= response.status < 200:
+            response.length = 0
+        else:
+            try:
+                response.length = int(response.headers.get('Content-Length'))
+            except:
+                response.length = None
     return response

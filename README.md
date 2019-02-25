@@ -1,8 +1,12 @@
 # GotoX
 - GotoX 修改自 goagent，其主要目的在于，当访问的网络服务出现问题，用户可以通过方便快速地添加更改规则来自行解决。
-- 其特色，一是自动代理，可支持标准 HTTP/1.1 请求；二是可根据需要修改来自客户端的请求以及服务器返回的响应。
+- 其特色，一是自动代理，可支持标准 HTTP/1.1 请求；二是可通过修改 TLS 的 SNI 扩展直连大部分网站。
 - 主要使用 GAE 服务作为后端代理，也支持 HTTP/SOCKS4/SOCKS5 代理，两者处于同等地位。SOCKS 代理支持认证。
-- 运行时会一直维护一个较小但快速的 GAE IP 列表。
+- 运行时可一直维护一个较小但快速的 GAE IP 列表。
+
+# 可用性（2018/12/20）
+- 由于谷歌服务器变化，可使用的 GAE 服务器急剧减少，可根据当地 ISP 情况选择使用 IPv4、原生 IPv6 或 IPv6 隧道连接 GAE。
+- 使用 SNIProxy 链接 GAE 时（不应作为常规方法，仅为后备），请注意 **[gae/servername]** 参数的选择，详见配置注释。
 
 # 安全
 - 由于平台限制，对于通过 GAE 的 https 流量，GotoX 使用自动生成的证书作为凭证，采取中间人方法进行代理；对于需要修改（某些自动代理规则需要）的 https 流量也是如此，不论其是否通过 GAE。
@@ -10,38 +14,40 @@
 - 默认配置时，GotoX 会验证 GAE 服务器的中级证书是否为谷歌 [GIAG2](https://pki.google.com/GIAG2.crt)，同时会在 AppID 请求 https 网址时验证其证书有效性。
 - 使用 GAE 代理也就意味着：你需要**信任谷歌和你所使用的 AppID 服务端的权限者**，他们能够窥探和修改通过 GAE 代理的流量信息。
 - **为防止被滥用，谷歌在 GAE 代理的头字段中会包含了你使用的 AppID 和原始请求的 TraceID 信息，请慎记之。**
+- 支持通过 https 代理协议连接 GotoX，然而非加密后端规则（非 GAEProxy、HTTPS）的 http 连接从代理连出去仍然是普通 http 连接，这只是作为一个方法验证来实现。
 
 # 部署服务端
-- 推荐使用[本项目 fork 的 GoProxy GAE 服务端分支](https://github.com/SeaHOH/GotoX/tree/gaeserver.goproxy)，包含一些小改动，可完全兼容 GoProxy 客户端。同时本项目不再兼容 GoProxy GAE 以外的服务端。
+- 推荐使用[本项目 fork 的 GoProxy GAE 服务端分支](https://github.com/SeaHOH/GotoX/tree/gaeserver.goproxy)，包含一些小改动，可完全兼容 GoProxy/[zebra](https://github.com/MeABc/zebra) 客户端。同时本项目不再兼容其它服务端，如 XX-Net GAE 服务端。
 - 申请 AppID 或部署服务端时，可尝试直接以默认配置运行本代理使用；如果无法顺利进行，请使用 VPN、Shadowsocks 等其它代理重新开始。
     - **警告**：不建议使用未知来源的 AppID，它们**可能会记录你的各种信息，甚至更改你的流量**以达到更危险的目的。
 - **相关链接**
-    - 简易教程 https://github.com/SeaHOH/goproxy/blob/wiki/SimpleGuide.md
-    - 常见问题 https://github.com/SeaHOH/goproxy/blob/wiki/FAQ.md
-    - 新版谷歌云部署问题 https://github.com/XX-net/XX-Net/issues/4720
+    - 简易教程 https://github.com/SeaHOH/GotoX/wiki/简易部署教程
+    - 常见问题 https://github.com/SeaHOH/GotoX/wiki/常见问题
 
 # 使用
 - **主要配置：**
     - 具体配置说明，在配置文件中都有较为详细的描述。只有 `Config.ini` 支持 `Config.user.ini` 用户配置。
-    - 需事先提供由**其它扫描工具**取得一个较大的（最好有几千上万）**可用的** GAE IP 列表以供筛选，放入 `data/ip.txt` 或 `data/ipex.txt` 中。
+    - 需事先提供由**其它扫描工具**取得一个较大的**可用的** GAE/GWS IP 列表以供筛选，放入 `data/ip.txt` 或 `data/ip_ex.txt` 中。
         - 格式为每行一个完整 IP；
         - 每次修改或新建以上两个文件时都会自动进行备份，只有一份，会被后来的覆盖；
-        - `ipex.txt` 中的 IP 会优先使用，同时会自动并入 `ip.txt`；
-        - `ipex.txt` 文件会在修改后大约二至十二小时内被删除，其 IP 优先使用也同时失效；
-        - 从列表载入 IP 时，会根据 `ip_bad.txt` 记录判断生成永久屏蔽 IP，并放入 `ip_del.txt`；
-        - 如果新加 IP 包含永久屏蔽 IP，会自动从 `ip_del.txt` 删除重置。
+        - `ip_ex.txt` 中的 IP 会优先使用，同时会自动并入 `ip.txt`；
+        - `ip_ex.txt` 文件会在修改后大约二至十二小时内被删除，其 IP 优先使用也同时失效；
+        - `ip_del.txt` 文件负责记录根据统计数据判断生成永久屏蔽 IP ；
+        - 如果 `ip_ex.txt` 新加 IP 包含永久屏蔽 IP，会自动从 `ip_del.txt` 删除重置。
+        - 其余 `ip_` 开头的文件为统计数据，可以删除它们以重置状态。
         - **注意**：首次使用或长时间未运行时，请在启动后等待 1-5 分钟，让 GotoX 完成 IP 筛选。
+        - 更多细节请查看配置文件注释。
     - 也可以在 **［gae/iplist］** 配置中指定使用固定的 GAE IP 列表，不再持续进行 IP 检查筛选。
 - **自动化：**
     - 自动代理规则和 IP 列表文件可以在运行时替换，无需重启 GotoX。
     - 直连和转发规则失败后，会根据条件判断是否尝试使用 GAE 规则。
     - 可设置三级 DNS 查询优先级：系统设置、**［dns/server］** 配置、谷歌 DNS-over-HTTPS API。
 - **使用 IP 列表：**
-    - google IP 列表名称“**google_gws、google_com**”选项由代理自身维护，无需用户填写；
+    - google IP 列表名称“**google_gae、google_gws**”选项由代理自身维护，无需用户填写；
     - 用户可以使用其它名称配置自己的 IP 列表，以供自动规则使用。
-    - “**google_gws**”是未分类的 gws 服务器，用于 GAE 代理，一般不用设置成这个；
-    - “**google_com**”是支持一般谷歌域名反向代理的服务器，可用于大部分 google 域名直连，转发则有极小概率出现证书错误。
-    - 默认谷歌配置是用 google_gws 直连，兼容性较好；也可配置成用 google_com 转发，保持谷歌证书不变，特殊谷歌主机名需自行测试调整。
+    - “**google_gae**”，用于 GAE 代理，也可用于 google_gws，为保证代理顺畅一般规则不使用这个列表；
+    - “**google_gws**”是未分类的 gws 服务器，可用于大部分 google 域名直连规则（默认配置），使用转发规则有可能出现证书错误。
+    - 特殊谷歌主机名需自行测试调整，如文件上传服务器等。
     - **相关链接**
         - 如何区分各种 Server 端｜思起（转） https://github.com/SeaHOH/GotoX/wiki/GServers
         - 如何区分各种 Server 端｜思起（原） https://blog.aofall.com/archives/7.html
@@ -49,7 +55,15 @@
     - 自动代理端口需自行配置规则，可根据需要自动分配链接路径，推荐使用（开发动力之一）；
     - 要使用自动代理请先仔细阅读配置规则说明，由于未添加完全的检测，错误规则可能导致程序出错或非预期的代理结果；
     - GAE 端口完全使用 GAE 代理，只有当遇到不支持的方法时转用直连，如果此网络资源处于屏蔽状态链接会失败。
+    - 这两个端口还支持 https 方式代理，建议分别设置代理协议，https 连接还是使用 http 方式代理，否则会形成双重加密，不仅耗费资源还可能被 Qos 限速；
+    - 使用 https 方式代理，需设置一个 IP 作为默认主机名称，详见配置文件 **[listen/iphost]** 项注释。
     - 可以直接配置使用自动代理端口，也可以用浏览器插件或其它工具进行调度。
+- **自定义 SNI 扩展：** 
+    - 通过改变 TSL 的 SNI 扩展，可以直接连接大部分服务器；此时应配合正确的 DNS 服务，或者使用内置的谷歌 DNS-over-HTTPS 服务。
+    - 同时也支持使用原主机名验证服务器证书；
+    - 使用此功能需要导入自签证书，手机应用可能无法正常使用。
+    - **相关链接**
+        - 如何使用伪造 SNI 的功能 https://github.com/SeaHOH/GotoX/wiki/如何使用伪造-SNI-的功能
 - **用户认证：** 支持以下方法，可设置免验证 IP 白名单。
     - **Basic 方法**认证。
         - 优点是支持广泛，基本不会因出错而无法使用；
@@ -64,7 +78,7 @@
     - 成功运行后会创建独一无二的 CA 证书，证书名称为：“**GotoX CA**”。
     - 配置好浏览器代理后，在地址栏输入“**http://gotox.go/** ” 即可安装或下载 CA 证书；
     - 也可在 `cert` 文件夹找到 `CA.crt` 证书文件；
-    - 由于还不完善，暂时不打算启用自动导入和删除功能，如有需求请手动删除老旧证书。
+    - 由于还不完善，暂时只支持 Windows 启用自动导入和删除功能，其它系统如有需求请手动删除老旧证书。
     - **相关链接**
         - 手动导入证书 https://github.com/XX-net/XX-Net/wiki/GoAgent-Import-CA
 - **本地服务：** 提供一个简单的支持加密链接的静态 web 服务器。
@@ -88,7 +102,7 @@
         - 可在**转发（forward）或直连（direct）** 规则中设置成**反向代理** IP；
         - 或在**其它代理（proxy）** 规则中设置成 **SOCKS 代理**（格式见 `ActionFilter.ini`）。
     - 反向代理一般**不支持**非加密链接，请**慎用**支持非加密链接的反向代理！
-    - 尽量不要在 GAE 代理中使用多线程下载工具下载大于 32MB 的文件，会导致 AppID 入口流量浪费（配额与出口相同也是每日 1GB），针对通过 GAE 代理的大文件下载可以使用内建 **autorange** 功能（具体配置见 `Config.ini`）。
+    - 尽量不要在 GAE 代理中使用多线程下载工具下载大于 32MB 的文件，会导致 Urlfetch 流量浪费（每日 5GB），针对通过 GAE 代理的大文件下载可以使用内建 **autorange** 功能（具体配置见 `Config.ini`）。
 
 # 兼容性
 - CPython 3.4/3.5 已测试。
@@ -98,9 +112,9 @@
     - pyOpenSSL 16.0.0 及以上
     - dnslib 0.8.3 及以上
     - PySocks 1.5.4 及以上
+- 可选组件：
     - brotlipy 0.5.0 及以上
 - 发布将提供包含 Windows CPython 3.5 环境的便携版本。
-- IPv6 未测试，欢迎反馈。
 - 由于自己只使用 Windows，所以其它系统不保证能正常使用。如果有需求作者会尽量修改，但这需要有人帮助测试反馈。
 
 # 计划

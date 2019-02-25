@@ -1,12 +1,13 @@
 # coding:utf-8
 
+import logging
 from .GlobalConfig import GC
 from .ProxyHandler import AutoProxyHandler, GAEProxyHandler
-from .common import logging, LRUCache
+from .common.util import LRUCache
 
 if GC.LISTEN_AUTH == 2:
     import string
-    from .compat import urlparse
+    from urllib.parse import quote, unquote
 
     login_page = '''
 <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
@@ -92,12 +93,16 @@ div, input {font-size: 12pt; font-family: arial,sans-serif}
                 if user in self.users:
                     logged_users = self.logged_users
                     auth_white_list = self.auth_white_list
-                    if user in logged_users:
+                    try:
                         #删除该用户之前登录的 IP，使其登录失效
                         del auth_white_list[logged_users[user]]
-                    if client_ip in auth_black_list:
+                    except KeyError:
+                        pass
+                    try:
                         #清除当前登 IP 的失败记录
                         del auth_black_list[client_ip]
+                    except KeyError:
+                        pass
                     #更新用户最新登录成功的 IP
                     logged_users[user] = client_ip
                     #登录成功加入白名单
@@ -108,15 +113,15 @@ div, input {font-size: 12pt; font-family: arial,sans-serif}
                         self.send_login_page(msg='登录成功！', disabled='disabled="disabled" ')
                     else:
                         #返回先前请求的网址
-                        target = urlparse.unquote(redirect) 
+                        target = unquote(redirect) 
                         self.write('HTTP/1.1 303 See Other\r\n'
                                    'Location: %s\r\n\r\n' % target)
                 else:
                     #登录失败计数
                     logging.error('%s 登录 GotoX 失败', self.address_string())
-                    if client_ip in auth_black_list:
+                    try:
                         auth_black_list[client_ip] += 1
-                    else:
+                    except KeyError:
                         auth_black_list[client_ip] = 1
                     self.send_login_page(redirect=redirect, msg='登录失败！')
             else:
@@ -139,7 +144,7 @@ div, input {font-size: 12pt; font-family: arial,sans-serif}
                 self.do_FAKECERT()
             else:
                 self._do_METHOD()
-                if self.ssl and self.url[8:].lower().startswith(self.login_url):
+                if self.ssl_request or self.ssl and self.url[8:].lower().startswith(self.login_url):
                     #只有登录地址为加密链接时才发送登录页面
                     redirect = ''
                     if self.command == 'POST':
@@ -161,7 +166,7 @@ div, input {font-size: 12pt; font-family: arial,sans-serif}
                         #纠正登录地址为加密链接
                         target = 'https://' + url[7:]
                     else:
-                        target = 'https://%s?redirect=%s' % (login_url, urlparse.quote(url))
+                        target = 'https://%s?redirect=%s' % (login_url, quote(url))
                     self.write('HTTP/1.1 302 Found\r\n'
                                'Cache-Control: no-cache\r\n'
                                'Location: %s\r\n\r\n' %  target)
@@ -204,7 +209,7 @@ div, input {font-size: 12pt; font-family: arial,sans-serif}
             else:
                 form_data = self.rfile.read()
             if form_data:
-                return urlparse.unquote(form_data.decode(charset))
+                return unquote(form_data.decode(charset))
             else:
                 return ''
 
@@ -272,9 +277,9 @@ elif GC.LISTEN_AUTH == 1:
                 self.do_FAKECERT()
             else:
                 self.write(self.auth_warning)
-                if client_ip in auth_black_list:
+                try:
                     auth_black_list[client_ip] += self.every_try_times
-                else:
+                except KeyError:
                     auth_black_list[client_ip] = self.every_try_times
                 logging.error('%s 请求代理，但密码错误！"%s %s"',
                         self.address_string(), self.command, self.url or self.path)
@@ -291,14 +296,6 @@ class AutoProxyAuthHandler(ProxyAuthHandler, AutoProxyHandler):
         if self.check_auth():
             AutoProxyHandler.do_METHOD(self)
 
-    do_GET = do_METHOD
-    do_PUT = do_METHOD
-    do_POST = do_METHOD
-    do_HEAD = do_METHOD
-    do_DELETE = do_METHOD
-    do_OPTIONS = do_METHOD
-    do_PATCH = do_METHOD
-
 class GAEProxyAuthHandler(ProxyAuthHandler, GAEProxyHandler):
 
     def do_CONNECT(self):
@@ -308,11 +305,3 @@ class GAEProxyAuthHandler(ProxyAuthHandler, GAEProxyHandler):
     def do_METHOD(self):
         if self.check_auth():
             GAEProxyHandler.do_METHOD(self)
-
-    do_GET = do_METHOD
-    do_PUT = do_METHOD
-    do_POST = do_METHOD
-    do_HEAD = do_METHOD
-    do_DELETE = do_METHOD
-    do_OPTIONS = do_METHOD
-    do_PATCH = do_METHOD

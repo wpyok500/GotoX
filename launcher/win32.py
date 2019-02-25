@@ -10,17 +10,18 @@ if os.path.islink(__file__):
     __file__ = getattr(os, 'readlink', lambda x: x)(__file__)
 
 app_root = os.path.dirname(os.path.dirname(__file__))
-py_path = os.path.join(app_root, 'python')
-py_exe = sys.executable
+py_dir = os.path.join(app_root, 'python')
 app_start = os.path.join(app_root, 'start.py')
 icon_gotox = os.path.join(app_root, 'gotox.ico')
+create_shortcut_js = os.path.join(app_root, 'create_shortcut.vbs')
 config_dir = os.path.join(app_root, 'config')
-ipdb_direct = os.path.join(app_root, 'data', 'directip.db')
+direct_ipdb = os.path.join(app_root, 'data', 'directip.db')
+direct_domains = os.path.join(app_root, 'data', 'directdomains.txt')
 refresh_proxy = os.path.join(app_root, 'launcher', 'refresh_proxy_win.py')
 
 #使用安装版 Python
-if os.path.dirname(py_exe) != py_path:
-    helpers = os.path.join(py_path, 'site-packages', 'helpers_win32.egg')
+if os.path.dirname(sys.executable) != py_dir:
+    helpers = os.path.join(py_dir, 'site-packages', 'helpers_win32.egg')
     sys.path.insert(0, helpers)
 sys.path.insert(0, app_root)
 
@@ -34,7 +35,8 @@ CONFIG_FILENAME = os.path.join(config_dir, 'Config.ini')
 CONFIG_USER_FILENAME = re.sub(r'\.ini$', '.user.ini', CONFIG_FILENAME)
 CONFIG_AUTO_FILENAME = os.path.join(config_dir, 'ActionFilter.ini')
 
-def get_listen_addr():
+def load_config():
+    global LISTEN_GAE, LISTEN_AUTO
     CONFIG = ConfigParser(inline_comment_prefixes=('#', ';'))
     CONFIG._optcre = re.compile(r'(?P<option>[^=\s]+)\s*(?P<vi>=?)\s*(?P<value>.*)')
     CONFIG.read([CONFIG_FILENAME, CONFIG_USER_FILENAME])
@@ -48,9 +50,12 @@ def get_listen_addr():
         if LINK_PROFILE not in ('ipv4', 'ipv6', 'ipv46'):
             LINK_PROFILE = 'ipv4'
         LISTEN_IP = '127.0.0.1' if '4' in LINK_PROFILE else '::1'
-    LISTEN_GAE = '%s:%d' % (LISTEN_IP, CONFIG.getint('listen', 'gae_port'))
-    LISTEN_AUTO = '%s:%d' % (LISTEN_IP, CONFIG.getint('listen', 'auto_port'))
-    return proxy_server(LISTEN_GAE, True), proxy_server(LISTEN_AUTO, True)
+    _LISTEN_GAE = '%s:%d' % (LISTEN_IP, CONFIG.getint('listen', 'gae_port'))
+    _LISTEN_AUTO = '%s:%d' % (LISTEN_IP, CONFIG.getint('listen', 'auto_port'))
+    LISTEN_GAE = proxy_server(_LISTEN_GAE, True)
+    LISTEN_AUTO = proxy_server(_LISTEN_AUTO, True)
+    LISTEN_DEBUGINFO = _LOGLv[min(CONFIG.getint('listen', 'debuginfo'), 3)]
+    logging.setLevel(LISTEN_DEBUGINFO)
 
 import winreg
 
@@ -72,7 +77,7 @@ class proxy_server:
             self.pac = server_str
             return
         elif '=' in server_str:
-            for k, v in (kv.split('=', 1) for kv in server_str.split(';')):
+            for k, v in (kv.split('=', 1) for kv in server_str.split(';') if kv):
                 self.__setattr__(k, v)
         else:
             self.http = server_str
@@ -159,17 +164,26 @@ def refresh_proxy_state(enable=None):
         #导入默认代理例外地址
         if not ProxyOverride:
             winreg.SetValueEx(SETTINGS, 'ProxyOverride', 0,  winreg.REG_SZ, ProxyOverride)
-    Popen((py_exe, refresh_proxy))
+    Popen((sys.executable, refresh_proxy))
 
 from subprocess import Popen
 from local import __version__ as gotoxver, clogging as logging
 
+logging.replace_logging()
+logging.addLevelName(15, 'TEST', logging._colors.GREEN)
+_LOGLv = {
+    0 : logging.WARNING,
+    1 : logging.INFO,
+    2 : logging.TEST,
+    3 : logging.DEBUG
+    }
+
 GotoX_app = None
 
 def start_GotoX():
-    global GotoX_app, LISTEN_GAE, LISTEN_AUTO
-    LISTEN_GAE, LISTEN_AUTO = get_listen_addr()
-    GotoX_app = Popen((py_exe, app_start))
+    global GotoX_app
+    load_config()
+    GotoX_app = Popen((sys.executable, app_start))
     os.environ['HTTPS_PROXY'] = os.environ['HTTP_PROXY'] = LISTEN_AUTO.http
 
 def stop_GotoX():
@@ -191,9 +205,19 @@ def on_show(systray):
 def on_hide(systray):
     ctypes.windll.user32.ShowWindow(hwnd, 0)
 
+def on_create_shortcut(systray):
+    os.system(create_shortcut_js)
+
+from urllib.request import urlopen
+def on_reset_dns(systray):
+    urlopen('http://localhost/docmd?cmd=reset_dns')
+
+def on_reset_autorule(systray):
+    urlopen('http://localhost/docmd?cmd=reset_autorule')
+
 def on_refresh(systray):
     if ctypes.windll.user32.MessageBoxW(None,
-            '是否重新载入 CotoX？', '请确认', 4 | 48) == 6:
+            '是否重新载入 GotoX？', '请确认', 4 | 48) == 6:
         stop_GotoX()
         start_GotoX()
         ctypes.windll.user32.ShowWindow(hwnd, 8)
@@ -270,6 +294,10 @@ def on_right_click(systray):
 
 from winsystray import SysTrayIcon, win32_adapter
 import buildipdb
+import builddomains
+
+buildipdb.ds_APNIC.load_ext()
+builddomains.ds_FELIX.load_ext()
 
 MFS_CHECKED = win32_adapter.MFS_CHECKED
 MFS_DISABLED = win32_adapter.MFS_DISABLED
@@ -277,17 +305,41 @@ MFS_DEFAULT = win32_adapter.MFS_DEFAULT
 MFT_RADIOCHECK = win32_adapter.MFT_RADIOCHECK
 fixed_fState = MFS_CHECKED | MFS_DISABLED
 
+def download_cniplist(p):
+    msg = buildipdb.download_cniplist_as_db(direct_ipdb, p)
+    if msg:
+        balloons_warning(msg)
+
+def download_domains(p):
+    msg = builddomains.download_domains_as_txt(direct_domains, p)
+    if msg:
+        balloons_warning(msg)
+
 last_main_menu = None
 sub_menu1 = (('打开默认配置', lambda x: Popen(CONFIG_FILENAME, shell=True)), #双击打开第一个有效命令
              ('打开用户配置', lambda x: Popen(CONFIG_USER_FILENAME, shell=True)),
              ('打开自动规则配置', lambda x: Popen(CONFIG_AUTO_FILENAME, shell=True)))
-sub_menu2 = (('建议更新频率：10～30 天一次', 'pass', MFS_DISABLED),
-             (None, '-'),
-             ('从 APNIC 下载（每日更新）', lambda x: buildipdb.download_apnic_cniplist_as_db(ipdb_direct)),
-             ('从 17mon 下载（每月初更新）', lambda x: buildipdb.download_17mon_cniplist_as_db(ipdb_direct)),
-             ('从以上两者下载后合并', lambda x: buildipdb.download_both_cniplist_as_db(ipdb_direct)))
 
 def build_menu(systray):
+    mo_state = buildipdb.ds_APNIC.check_ext('mo') and MFS_CHECKED
+    hk_state = buildipdb.ds_APNIC.check_ext('hk') and MFS_CHECKED
+    sub_menu2 = (('建议更新频率：10～30 天一次', 'pass', MFS_DISABLED),
+                 (None, '-'),
+                 ('Ⅰ 从 APNIC 下载（每日更新）', lambda x: download_cniplist(buildipdb.ds_APNIC)),
+                 ('    ├─ 包含澳门', lambda x: buildipdb.ds_APNIC.switch_ext('mo', save=True), mo_state, MFT_RADIOCHECK),
+                 ('    └─ 包含香港', lambda x: buildipdb.ds_APNIC.switch_ext('hk', save=True), hk_state, MFT_RADIOCHECK),
+                 ('Ⅱ 从 17mon 下载（每月初更新）', lambda x: download_cniplist(buildipdb.ds_17MON)),
+                 ('Ⅲ 从 gaoyifan 下载（每日更新）', lambda x: download_cniplist(buildipdb.ds_GAOYIFAN)),
+                 ('从 Ⅰ、Ⅱ 下载后合并', lambda x: download_cniplist(buildipdb.ds_APNIC | buildipdb.ds_17MON)),
+                 ('从 Ⅰ、Ⅲ 下载后合并', lambda x: download_cniplist(buildipdb.ds_APNIC | buildipdb.ds_GAOYIFAN)),
+                 ('从 Ⅱ、Ⅲ 下载后合并', lambda x: download_cniplist(buildipdb.ds_17MON | buildipdb.ds_GAOYIFAN)),
+                 ('全部下载后合并', lambda x: download_cniplist(buildipdb.data_source_manager.sign_all)))
+    fapple_state = builddomains.ds_FELIX.check_ext('apple') and MFS_CHECKED
+    sub_menu3 = (('建议更新频率：1～7 天一次', 'pass', MFS_DISABLED),
+                 (None, '-'),
+                 ('Ⅰ 从 felixonmars 下载（每日更新）', lambda x: download_domains(builddomains.ds_FELIX)),
+                 ('    └─ 包含 apple', lambda x: builddomains.ds_FELIX.switch_ext('apple', save=True), fapple_state, MFT_RADIOCHECK),
+                 ('全部下载后合并', lambda x: download_domains(builddomains.data_source_manager.sign_all)))
     global proxy_state_menu, last_main_menu
     proxy_state_menu = proxy_state = get_proxy_state()
     disable_state = proxy_state.type == 0 and fixed_fState or 0
@@ -297,7 +349,7 @@ def build_menu(systray):
     disable_socks_state = disable_state or proxy_state.type & 2 and not proxy_state.socks and fixed_fState or 0
     auto_state = proxy_state.type == 2 and LISTEN_AUTO in proxy_state and fixed_fState or 0
     gae_state = proxy_state.type == 2 and LISTEN_GAE in proxy_state  and fixed_fState or 0
-    sub_menu3 = (
+    sub_menu4 = (
                  ('使用自动代理', on_enable_auto_proxy, auto_state, MFT_RADIOCHECK),
                  ('使用 GAE 代理', on_enable_gae_proxy, gae_state, MFT_RADIOCHECK),
                  ('完全禁用代理', on_disable_proxy, disable_state, MFT_RADIOCHECK),
@@ -311,10 +363,14 @@ def build_menu(systray):
     hide_state = not visible and fixed_fState or 0
     main_menu = (('GotoX 设置', sub_menu1, icon_gotox, MFS_DEFAULT),
                  ('更新直连 IP 库', sub_menu2),
+                 ('更新直连域名列表', sub_menu3),
                  (None, '-'),
                  ('显示窗口', on_show, show_state, MFT_RADIOCHECK),
                  ('隐藏窗口', on_hide, hide_state, MFT_RADIOCHECK),
-                 ('设置系统（IE）代理', sub_menu3),
+                 ('创建桌面快捷方式', on_create_shortcut),
+                 ('设置系统（IE）代理', sub_menu4),
+                 ('重置 DNS 缓存', on_reset_dns),
+                 ('重置自动规则缓存', on_reset_autorule),
                  ('重启 GotoX', on_refresh),
                  (None, '-'),
                  ('关于', on_about))
@@ -328,33 +384,37 @@ systray_GotoX = SysTrayIcon(icon_gotox, 'GotoX', None, quit_item,
                             right_click=on_right_click)
 systray_GotoX.start()
 start_GotoX()
-#LISTEN_GAE, LISTEN_AUTO = get_listen_addr()
+#load_config()
 
 from time import sleep
 
+def balloons_info(text, title='GotoX 通知'):
+    systray_GotoX.update(
+        hover_text='GotoX\n当前系统（IE）代理：\n%s' % proxy_state,
+        balloons=(text, title, 4 | 32, 15)
+        )
+
+def balloons_warning(text, title='注意'):
+    systray_GotoX.update(
+        hover_text='GotoX\n当前系统（IE）代理：\n%s' % proxy_state,
+        balloons=(text, title, 2 | 32, 15)
+        )
+
 proxy_state = get_proxy_state()
 sleep(1)
-systray_GotoX.update(
-    hover_text='GotoX\n当前系统（IE）代理：\n%s' % proxy_state,
-    balloons=('\nGotoX 已经启动。        \n\n'
+balloons_info('\nGotoX 已经启动。        \n\n'
               '左键单击：打开菜单\n\n'
               '左键双击：打开配置\n\n'
-              '右键单击：隐藏窗口\n\n'
+              '右键单击：隐显窗口\n\n'
               '当前系统代理设置为：\n'
-              '%s' % proxy_state,
-              'GotoX 通知', 4 | 32, 15)
-    )
-
+              '%s' % proxy_state)
 running = True
 while running:
     now_proxy_state = get_proxy_state()
     if proxy_state.str != now_proxy_state.str:
         text = '设置由：\n%s\n变更为：\n%s' % (proxy_state, now_proxy_state)
         proxy_state = now_proxy_state
-        systray_GotoX.update(
-            hover_text='GotoX\n当前系统（IE）代理：\n%s' % proxy_state,
-            balloons=(text, '系统代理改变', 2 | 32, 15)
-            )
+        balloons_warning(text, '系统代理改变')
     for _ in range(50):
         if running:
             sleep(0.1)
